@@ -10,6 +10,7 @@ dotenv.config();
  */
 export class LLMConnectorFactory {
   private static connectors: Map<string, LLMConnector> = new Map();
+  private static openRouterConnector: OpenRouterConnector | undefined;
 
   /**
    * Initialize all available connectors
@@ -18,8 +19,8 @@ export class LLMConnectorFactory {
     // Initialize OpenRouter connector
     const openRouterApiKey = process.env.OPENROUTER_API_KEY;
     if (openRouterApiKey) {
-      const openRouterConnector = new OpenRouterConnector(openRouterApiKey);
-      LLMConnectorFactory.connectors.set('openrouter', openRouterConnector);
+      LLMConnectorFactory.openRouterConnector = new OpenRouterConnector(openRouterApiKey);
+      LLMConnectorFactory.connectors.set('openrouter', LLMConnectorFactory.openRouterConnector);
     }
 
     // More connectors can be added here in the future
@@ -31,7 +32,11 @@ export class LLMConnectorFactory {
    * @returns The connector instance or undefined if not found
    */
   static getConnector(name: string): LLMConnector | undefined {
-    return LLMConnectorFactory.connectors.get(name.toLowerCase());
+    // Map all providers to OpenRouter
+    if (LLMConnectorFactory.openRouterConnector) {
+      return LLMConnectorFactory.openRouterConnector;
+    }
+    return undefined;
   }
 
   /**
@@ -39,7 +44,7 @@ export class LLMConnectorFactory {
    * @returns The OpenRouter connector instance
    */
   static getOpenRouterConnector(): OpenRouterConnector | undefined {
-    return LLMConnectorFactory.connectors.get('openrouter') as OpenRouterConnector;
+    return LLMConnectorFactory.openRouterConnector;
   }
 
   /**

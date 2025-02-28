@@ -20,11 +20,11 @@ const BenchmarkRunner: React.FC = () => {
 
   // Available benchmark types
   const benchmarkTypes = [
-    { id: 'reasoning', name: 'Reasoning & Problem Solving' },
-    { id: 'knowledge', name: 'Knowledge & Facts' },
-    { id: 'creativity', name: 'Creativity & Generation' },
-    { id: 'coding', name: 'Code Generation & Analysis' },
-    { id: 'conversation', name: 'Conversation & Chat' }
+    { id: 'Reasoning', name: 'Reasoning & Problem Solving' },
+    { id: 'Knowledge', name: 'Knowledge & Facts' },
+    { id: 'Creativity', name: 'Creativity & Generation' },
+    { id: 'Coding', name: 'Code Generation & Analysis' },
+    { id: 'Conversation', name: 'Conversation & Chat' }
   ];
 
   useEffect(() => {

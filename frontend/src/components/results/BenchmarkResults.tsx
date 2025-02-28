@@ -14,35 +14,8 @@ import {
 } from 'recharts';
 import ResultsFilter from './ResultsFilter';
 import ResultsSort from './ResultsSort';
-
-interface BenchmarkResult {
-  id: string;
-  modelName: string;
-  benchmarkType: string;
-  score: number;
-  metrics: {
-    accuracy?: number;
-    latency?: number;
-    tokens?: number;
-    [key: string]: any;
-  };
-  output: string;
-  error?: string;
-  created_at: string;
-}
-
-interface BenchmarkRun {
-  id: string;
-  modelId: string;
-  modelName: string;
-  benchmarkType: string;
-  status: 'running' | 'completed' | 'failed';
-  progress: number;
-  startTime: string;
-  endTime?: string;
-  results?: BenchmarkResult[];
-  error?: string;
-}
+import BenchmarkResultDetails from './BenchmarkResultDetails';
+import { BenchmarkRunResults } from '../../types/benchmark';
 
 interface Filters {
   model?: string;
@@ -56,123 +29,164 @@ interface Sort {
 }
 
 const BenchmarkResults: React.FC = () => {
-  const [runs, setRuns] = useState<BenchmarkRun[]>([]);
+  const [runs, setRuns] = useState<BenchmarkRunResults[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
+  const [runDetails, setRunDetails] = useState<BenchmarkRunResults | null>(null);
   const [filters, setFilters] = useState<Filters>({});
   const [sort, setSort] = useState<Sort>({ field: 'date', direction: 'desc' });
 
   const uniqueModels = useMemo(() => {
     const models = new Set<string>();
-    runs.forEach(run => models.add(run.modelName));
+    runs.forEach(run => {
+      if (run.model?.name) {
+        models.add(run.model.name);
+      }
+    });
     return Array.from(models);
   }, [runs]);
 
   const uniqueBenchmarkTypes = useMemo(() => {
     const types = new Set<string>();
-    runs.forEach(run => types.add(run.benchmarkType));
+    runs.forEach(run => {
+      if (run.benchmark?.name) {
+        types.add(run.benchmark.name);
+      }
+    });
     return Array.from(types);
   }, [runs]);
 
   useEffect(() => {
-    fetchResults();
-    // Poll for updates every 10 seconds
-    const interval = setInterval(fetchResults, 10000);
-    return () => clearInterval(interval);
-  }, []);
+    const fetchResults = async () => {
+      try {
+        setLoading(true);
+        const response = await axios.get<BenchmarkRunResults[]>(
+          `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/api/benchmarks/status`
+        );
+        console.log('API Response:', response.data);
+        setRuns(response.data);
+        setError(null);
+      } catch (err) {
+        console.error('Error fetching benchmark results:', err);
+        setError('Failed to load benchmark results. Please try again later.');
+      } finally {
+        setLoading(false);
+      }
+    };
 
-  const fetchResults = async () => {
-    try {
-      setLoading(true);
-      const response = await axios.get<BenchmarkRun[]>(
-        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/api/benchmarks/status`
-      );
-      setRuns(response.data);
-      setError(null);
-    } catch (err) {
-      console.error('Error fetching benchmark results:', err);
-      setError('Failed to load benchmark results. Please try again later.');
-    } finally {
-      setLoading(false);
+    // Initial fetch
+    fetchResults();
+
+    // Set up polling
+    const interval = setInterval(fetchResults, 10000);
+
+    // Cleanup
+    return () => clearInterval(interval);
+  }, []); // Empty dependency array since fetchResults is defined inside useEffect
+
+  useEffect(() => {
+    const fetchRunDetails = async (runId: string) => {
+      try {
+        setLoading(true);
+        const response = await axios.get<BenchmarkRunResults>(
+          `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/api/benchmarks/${runId}/results`
+        );
+        setRunDetails(response.data);
+        setError(null);
+      } catch (err) {
+        console.error('Error fetching run details:', err);
+        setError('Failed to load benchmark details');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    if (selectedRun) {
+      fetchRunDetails(selectedRun);
+    } else {
+      setRunDetails(null);
     }
-  };
+  }, [selectedRun]);
 
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleString();
   };
 
-  const getChartData = (run: BenchmarkRun) => {
+  const getChartData = (run: BenchmarkRunResults) => {
     if (!run.results) return [];
     
     return run.results.map(result => ({
-      name: result.modelName,
+      name: `Test ${result.id}`,
       score: result.score || 0,
-      accuracy: result.metrics.accuracy || 0,
-      latency: result.metrics.latency || 0,
+      latency: result.metrics.latencyMs || 0,
     }));
   };
 
-  const filterRuns = (runs: BenchmarkRun[]) => {
-    return runs.filter(run => {
-      if (filters.model && run.modelName !== filters.model) {
-        return false;
-      }
-      if (filters.benchmarkType && run.benchmarkType !== filters.benchmarkType) {
-        return false;
-      }
-      if (filters.dateRange) {
-        const runDate = new Date(run.startTime);
-        const now = new Date();
-        const daysDiff = (now.getTime() - runDate.getTime()) / (1000 * 60 * 60 * 24);
-        
-        switch (filters.dateRange) {
-          case 'today':
-            return daysDiff < 1;
-          case 'week':
-            return daysDiff < 7;
-          case 'month':
-            return daysDiff < 30;
-          case 'quarter':
-            return daysDiff < 90;
-          default:
-            return true;
+  const filterRuns = useMemo(() => {
+    return (runs: BenchmarkRunResults[]) => {
+      return runs.filter(run => {
+        if (filters.model && run.model?.name !== filters.model) {
+          return false;
         }
-      }
-      return true;
-    });
-  };
+        if (filters.benchmarkType && run.benchmark?.name !== filters.benchmarkType) {
+          return false;
+        }
+        if (filters.dateRange) {
+          const runDate = new Date(run.startTime);
+          const now = new Date();
+          const daysDiff = (now.getTime() - runDate.getTime()) / (1000 * 60 * 60 * 24);
+          
+          switch (filters.dateRange) {
+            case 'today':
+              return daysDiff < 1;
+            case 'week':
+              return daysDiff < 7;
+            case 'month':
+              return daysDiff < 30;
+            case 'quarter':
+              return daysDiff < 90;
+            default:
+              return true;
+          }
+        }
+        return true;
+      });
+    };
+  }, [filters]);
 
-  const sortRuns = (runs: BenchmarkRun[]) => {
-    return [...runs].sort((a, b) => {
-      switch (sort.field) {
-        case 'date':
-          const dateA = new Date(a.startTime).getTime();
-          const dateB = new Date(b.startTime).getTime();
-          return sort.direction === 'desc' ? dateB - dateA : dateA - dateB;
-        
-        case 'score':
-          const scoreA = a.results?.[0]?.score || 0;
-          const scoreB = b.results?.[0]?.score || 0;
-          return sort.direction === 'desc' ? scoreB - scoreA : scoreA - scoreB;
-        
-        case 'model':
-          const modelA = a.modelName.toLowerCase();
-          const modelB = b.modelName.toLowerCase();
-          return sort.direction === 'desc'
-            ? modelB.localeCompare(modelA)
-            : modelA.localeCompare(modelB);
-        
-        default:
-          return 0;
-      }
-    });
-  };
+  const sortRuns = useMemo(() => {
+    return (runs: BenchmarkRunResults[]) => {
+      return [...runs].sort((a, b) => {
+        switch (sort.field) {
+          case 'date':
+            const dateA = new Date(a.startTime).getTime();
+            const dateB = new Date(b.startTime).getTime();
+            return sort.direction === 'desc' ? dateB - dateA : dateA - dateB;
+          
+          case 'score':
+            const scoreA = a.results?.[0]?.score || 0;
+            const scoreB = b.results?.[0]?.score || 0;
+            return sort.direction === 'desc' ? scoreB - scoreA : scoreA - scoreB;
+          
+          case 'model':
+            const modelA = a.model?.name?.toLowerCase() || '';
+            const modelB = b.model?.name?.toLowerCase() || '';
+            return sort.direction === 'desc'
+              ? modelB.localeCompare(modelA)
+              : modelA.localeCompare(modelB);
+          
+          default:
+            return 0;
+        }
+      });
+    };
+  }, [sort]);
 
   const filteredAndSortedRuns = useMemo(() => {
     const filtered = filterRuns(runs);
     return sortRuns(filtered);
-  }, [runs, filters, sort]);
+  }, [runs, filterRuns, sortRuns]);
 
   const handleFilterChange = (newFilters: Partial<Filters>) => {
     setFilters(prev => ({ ...prev, ...newFilters }));
@@ -183,7 +197,7 @@ const BenchmarkResults: React.FC = () => {
   };
 
   return (
-    <div className="space-y-8">
+    <div className="container mx-auto px-4 py-8">
       <ResultsFilter
         models={uniqueModels}
         benchmarkTypes={uniqueBenchmarkTypes}
@@ -192,17 +206,19 @@ const BenchmarkResults: React.FC = () => {
 
       <ResultsSort onSortChange={handleSortChange} />
 
-      {error && (
-        <div className="bg-red-100 dark:bg-red-900 border-l-4 border-red-500 text-red-700 dark:text-red-200 p-4 rounded shadow-md">
-          <p className="text-sm">{error}</p>
+      {loading && (
+        <div className="text-center">
+          <p>Loading results...</p>
         </div>
       )}
 
-      {loading && runs.length === 0 && (
-        <div className="flex justify-center items-center py-12">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-700 dark:border-blue-400"></div>
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-600">{error}</p>
         </div>
       )}
+
+      {runDetails && <BenchmarkResultDetails run={runDetails} />}
 
       {!loading && filteredAndSortedRuns.length === 0 && !error && (
         <div className="text-center py-12 bg-gray-50 dark:bg-gray-700 rounded-lg">
@@ -228,11 +244,16 @@ const BenchmarkResults: React.FC = () => {
               <div className="flex justify-between items-start mb-4">
                 <div>
                   <h3 className="text-xl font-semibold text-gray-900 dark:text-white">
-                    {run.modelName} - {run.benchmarkType}
+                    {run.model?.name || 'Unknown Model'} - {run.benchmark?.name || 'Unknown Benchmark'}
                   </h3>
                   <p className="text-sm text-gray-500 dark:text-gray-400">
                     Run started: {formatDate(run.startTime)}
                   </p>
+                  {run.model?.provider && (
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      Provider: {run.model.provider}
+                    </p>
+                  )}
                 </div>
                 <span
                   className={`px-2 py-1 text-xs font-medium rounded-full ${
@@ -250,21 +271,60 @@ const BenchmarkResults: React.FC = () => {
               {run.results && run.results.length > 0 && (
                 <div className="mt-6">
                   <h4 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
-                    Performance Metrics
+                    Test Results
                   </h4>
-                  <div className="h-80 w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={getChartData(run)}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="name" />
-                        <YAxis />
-                        <Tooltip />
-                        <Legend />
-                        <Bar dataKey="score" fill="#3B82F6" name="Overall Score" />
-                        <Bar dataKey="accuracy" fill="#10B981" name="Accuracy" />
-                        <Bar dataKey="latency" fill="#F59E0B" name="Latency (ms)" />
-                      </BarChart>
-                    </ResponsiveContainer>
+                  <div className="space-y-4">
+                    {run.results.map((result) => (
+                      <div key={result.id} className="border rounded-lg p-4">
+                        <h5 className="font-medium">Test Case</h5>
+                        <div className="grid grid-cols-2 gap-4 mt-2">
+                          <div>
+                            <p className="text-sm text-gray-500">Prompt</p>
+                            <p className="mt-1">{result.prompt}</p>
+                          </div>
+                          <div>
+                            <p className="text-sm text-gray-500">Expected Output</p>
+                            <p className="mt-1">{result.expectedOutput}</p>
+                          </div>
+                        </div>
+                        
+                        <div className="mt-4">
+                          <h5 className="font-medium">Model Response</h5>
+                          <p className="mt-1 whitespace-pre-wrap">{result.response}</p>
+                        </div>
+
+                        <div className="mt-4 grid grid-cols-4 gap-4">
+                          <div>
+                            <p className="text-sm text-gray-500">Score</p>
+                            <p className="mt-1 font-medium">{result.score?.toFixed(2) || 'N/A'}</p>
+                          </div>
+                          {result.metrics?.latencyMs && (
+                            <div>
+                              <p className="text-sm text-gray-500">Latency</p>
+                              <p className="mt-1">{result.metrics.latencyMs}ms</p>
+                            </div>
+                          )}
+                          {result.metrics?.tokensInput && (
+                            <div>
+                              <p className="text-sm text-gray-500">Input Tokens</p>
+                              <p className="mt-1">{result.metrics.tokensInput}</p>
+                            </div>
+                          )}
+                          {result.metrics?.tokensOutput && (
+                            <div>
+                              <p className="text-sm text-gray-500">Output Tokens</p>
+                              <p className="mt-1">{result.metrics.tokensOutput}</p>
+                            </div>
+                          )}
+                        </div>
+
+                        {result.error && (
+                          <div className="mt-4">
+                            <p className="text-sm text-red-600">{result.error}</p>
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
@@ -293,8 +353,8 @@ const BenchmarkResults: React.FC = () => {
                         <h5 className="font-medium text-gray-900 dark:text-white mb-2">
                           Test Case Output
                         </h5>
-                        <pre className="bg-gray-100 dark:bg-gray-600 p-3 rounded text-sm overflow-x-auto">
-                          {result.output}
+                        <pre className="bg-gray-100 dark:bg-gray-600 p-3 rounded text-sm overflow-x-auto whitespace-pre-wrap">
+                          {result.response}
                         </pre>
                         {result.error && (
                           <p className="mt-2 text-red-600 dark:text-red-400">

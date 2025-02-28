@@ -30,6 +30,6 @@ router.get('/benchmarks/:benchmarkId/test-cases', adaptRoute(benchmarkController
 
 // Benchmark run routes
 router.get('/benchmark-runs/:runId', adaptRoute(benchmarkController.getBenchmarkRunStatus.bind(benchmarkController)));
-router.get('/benchmark-runs/:runId/results', adaptRoute(benchmarkController.getBenchmarkResults.bind(benchmarkController)));
+router.get('/benchmarks/:runId/results', adaptRoute(benchmarkController.getBenchmarkResults.bind(benchmarkController)));
 
 export default router; 

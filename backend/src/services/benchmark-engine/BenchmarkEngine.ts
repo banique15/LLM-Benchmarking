@@ -2,7 +2,7 @@ import { BenchmarkRun, BenchmarkResult, TestCase } from '../../models/Benchmark'
 import { Model } from '../../models/Model';
 import { LLMConnector, LLMRequestOptions } from '../llm-connectors/LLMConnector';
 import { LLMConnectorFactory } from '../llm-connectors/LLMConnectorFactory';
-import supabase from '../../db/supabase';
+import supabase, { refreshSchemaCache } from '../../db/supabase';
 
 export interface BenchmarkOptions {
   maxConcurrentTests?: number;
@@ -199,34 +199,69 @@ export class BenchmarkEngine {
         score = 1;
       }
 
-      // Create result
-      return {
+      // Create result object
+      const result = {
         benchmark_run_id: benchmarkRunId,
         model_id: model.id!,
         benchmark_id: testCase.benchmark_id,
         test_case_id: testCase.id!,
-        output: response.text,
+        prompt: testCase.prompt,
+        response: response.text,
+        expected_output: testCase.expected_output,
+        evaluation_criteria: testCase.evaluation_criteria,
         score: score,
-        metrics: {
-          character_count: response.text.length,
-          ...response.usage
-        },
-        latency_ms: response.latency_ms,
-        tokens_input: response.usage?.prompt_tokens || 0,
-        tokens_output: response.usage?.completion_tokens || 0
+        error: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
       };
+
+      // Refresh schema cache before saving
+      await refreshSchemaCache();
+
+      // Save result to database
+      const { error: insertError } = await supabase
+        .from('benchmark_results')
+        .insert([result]);
+
+      if (insertError) {
+        throw new Error(`Failed to save benchmark result: ${insertError.message}`);
+      }
+
+      // Return result
+      return result;
     } catch (error) {
       console.error(`Error running test case ${testCase.id}:`, error);
       
-      // Return a result with error
-      return {
+      // Create error result
+      const errorResult = {
         benchmark_run_id: benchmarkRunId,
         model_id: model.id!,
         benchmark_id: testCase.benchmark_id,
         test_case_id: testCase.id!,
+        prompt: testCase.prompt,
+        response: null,
+        expected_output: testCase.expected_output,
+        evaluation_criteria: testCase.evaluation_criteria,
         score: 0,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
       };
+
+      // Refresh schema cache before saving error result
+      await refreshSchemaCache();
+
+      // Save error result to database
+      const { error: insertError } = await supabase
+        .from('benchmark_results')
+        .insert([errorResult]);
+
+      if (insertError) {
+        throw new Error(`Failed to save benchmark error result: ${insertError.message}`);
+      }
+
+      // Return error result
+      return errorResult;
     }
   }
 
@@ -289,12 +324,6 @@ export class BenchmarkEngine {
    * Get the appropriate connector for a model
    */
   private getConnectorForModel(model: Model): LLMConnector | undefined {
-    // For OpenRouter, we use the OpenRouter connector regardless of the provider
-    const openRouterConnector = LLMConnectorFactory.getOpenRouterConnector();
-    if (openRouterConnector) {
-      return openRouterConnector;
-    }
-
-    return undefined;
+    return LLMConnectorFactory.getConnector(model.provider);
   }
 } 

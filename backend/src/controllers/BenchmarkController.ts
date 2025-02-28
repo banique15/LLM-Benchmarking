@@ -3,6 +3,83 @@ import { BenchmarkEngine } from '../services/benchmark-engine/BenchmarkEngine';
 import supabase from '../db/supabase';
 import { LLMConnectorFactory } from '../services/llm-connectors/LLMConnectorFactory';
 
+// Update these interfaces at the top of the file, after the imports
+interface TestCase {
+  prompt: string;
+  expected_output: string;
+  evaluation_criteria: string;
+}
+
+interface BenchmarkResult {
+  id: string;
+  prompt: string;
+  response: string;
+  expected_output: string;
+  score: number;
+  error?: string;
+  metrics?: Record<string, any>;
+  latency_ms?: number;
+  tokens_input?: number;
+  tokens_output?: number;
+  test_case_id: string;
+  test_cases: TestCase;
+}
+
+interface Benchmark {
+  id: string;
+  name: string;
+  description: string;
+}
+
+interface Model {
+  id: string;
+  name: string;
+  provider: string;
+}
+
+interface BenchmarkRunModel {
+  models: {
+    id: string;
+    name: string;
+    provider: string;
+  };
+}
+
+interface BenchmarkRunBenchmark {
+  benchmarks: {
+    id: string;
+    name: string;
+    description: string;
+  };
+}
+
+interface BenchmarkRunData {
+  id: string;
+  status: string;
+  progress: number | null;
+  started_at: string;
+  completed_at: string | null;
+  error: string | null;
+  benchmark_run_models: [BenchmarkRunModel];
+  benchmark_run_benchmarks: [BenchmarkRunBenchmark];
+}
+
+interface BenchmarkRunResponse {
+  id: string;
+  status: string;
+  progress: number;
+  started_at: string;
+  completed_at: string;
+  error?: string;
+  benchmark_run_benchmarks: Array<{
+    benchmarks: Benchmark;
+  }>;
+  benchmark_run_models: Array<{
+    models: Model;
+  }>;
+  benchmark_results: Array<BenchmarkResult>;
+}
+
 export class BenchmarkController {
   private benchmarkEngine: BenchmarkEngine;
 
@@ -145,7 +222,29 @@ export class BenchmarkController {
     try {
       const { data, error } = await supabase
         .from('benchmark_runs')
-        .select('*')
+        .select(`
+          id,
+          status,
+          progress,
+          started_at,
+          completed_at,
+          error,
+          duration,
+          benchmark_run_models (
+            model:models (
+              id,
+              name,
+              provider
+            )
+          ),
+          benchmark_run_benchmarks (
+            benchmark:benchmarks (
+              id,
+              name,
+              description
+            )
+          )
+        `)
         .eq('id', runId)
         .single();
 
@@ -157,10 +256,107 @@ export class BenchmarkController {
         return res.status(404).json({ error: 'Benchmark run not found' });
       }
 
-      return res.json(data);
+      // Calculate duration if not stored
+      const duration = data.duration || (
+        data.completed_at ? 
+        (new Date(data.completed_at).getTime() - new Date(data.started_at).getTime()) / 1000 :
+        (new Date().getTime() - new Date(data.started_at).getTime()) / 1000
+      );
+
+      // Transform the data to include model and benchmark information
+      const transformedData = {
+        id: data.id,
+        status: data.status,
+        progress: data.progress || 0,
+        startTime: data.started_at,
+        endTime: data.completed_at,
+        duration: `${Math.round(duration)}s`,
+        error: data.error,
+        model: data.benchmark_run_models?.[0]?.model || null,
+        benchmark: data.benchmark_run_benchmarks?.[0]?.benchmark || null
+      };
+
+      console.log('Benchmark status response:', JSON.stringify(transformedData, null, 2));
+      return res.json(transformedData);
     } catch (error) {
       console.error(`Error fetching benchmark run ${runId}:`, error);
       return res.status(500).json({ error: 'Failed to fetch benchmark run status' });
+    }
+  }
+
+  /**
+   * Get all active benchmark runs
+   */
+  async getBenchmarkRuns(req: Request, res: Response): Promise<Response> {
+    try {
+      console.log('Fetching benchmark runs...');
+      const { data, error } = await supabase
+        .from('benchmark_runs')
+        .select(`
+          *,
+          benchmark_run_models (
+            model:models (
+              id,
+              name,
+              provider
+            )
+          ),
+          benchmark_run_benchmarks (
+            benchmark:benchmarks (
+              id,
+              name,
+              description
+            )
+          )
+        `)
+        .order('created_at', { ascending: false })
+        .limit(10);
+
+      if (error) {
+        console.error('Supabase error:', error);
+        return res.status(500).json({ error: error.message });
+      }
+
+      if (!data) {
+        console.log('No data returned from Supabase');
+        return res.json([]);
+      }
+
+      console.log('Raw data from Supabase:', JSON.stringify(data, null, 2));
+
+      // Transform the data to match the frontend's expected format
+      const runs = data.map(run => {
+        const modelData = run.benchmark_run_models?.[0]?.model;
+        const benchmarkData = run.benchmark_run_benchmarks?.[0]?.benchmark;
+
+        const transformedRun = {
+          id: run.id,
+          status: run.status,
+          progress: run.progress || 0,
+          startTime: run.started_at,
+          endTime: run.completed_at,
+          error: run.error,
+          model: modelData ? {
+            id: modelData.id,
+            name: modelData.name,
+            provider: modelData.provider
+          } : null,
+          benchmark: benchmarkData ? {
+            id: benchmarkData.id,
+            name: benchmarkData.name,
+            description: benchmarkData.description
+          } : null
+        };
+
+        console.log('Single transformed run:', JSON.stringify(transformedRun, null, 2));
+        return transformedRun;
+      });
+
+      console.log('All transformed runs:', JSON.stringify(runs, null, 2));
+      return res.json(runs);
+    } catch (error) {
+      console.error('Unexpected error in getBenchmarkRuns:', error);
+      return res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to fetch benchmark runs' });
     }
   }
 
@@ -171,50 +367,78 @@ export class BenchmarkController {
     const { runId } = req.params;
 
     try {
-      // Get benchmark run details
       const { data: run, error: runError } = await supabase
         .from('benchmark_runs')
         .select(`
           *,
           benchmark_run_benchmarks (
-            benchmarks (*)
+            benchmark:benchmarks (
+              id,
+              name,
+              description
+            )
           ),
           benchmark_run_models (
-            models (*)
+            model:models (
+              id,
+              name,
+              provider
+            )
+          ),
+          benchmark_results (
+            id,
+            prompt,
+            response,
+            expected_output,
+            score,
+            error,
+            metrics,
+            latency_ms,
+            tokens_input,
+            tokens_output,
+            test_case_id,
+            test_cases (
+              prompt,
+              expected_output,
+              evaluation_criteria
+            )
           )
         `)
         .eq('id', runId)
         .single();
 
       if (runError || !run) {
+        console.error('Error fetching benchmark run:', runError);
         return res.status(500).json({ error: runError?.message || 'Benchmark run not found' });
       }
 
-      // Get results
-      const { data: results, error: resultsError } = await supabase
-        .from('benchmark_results')
-        .select('*')
-        .eq('benchmark_run_id', runId);
+      const transformedRun = {
+        id: run.id,
+        status: run.status,
+        progress: run.progress,
+        startTime: run.started_at,
+        endTime: run.completed_at,
+        error: run.error,
+        benchmark: run.benchmark_run_benchmarks?.[0]?.benchmark || null,
+        model: run.benchmark_run_models?.[0]?.model || null,
+        results: (run.benchmark_results || []).map((result: BenchmarkResult) => ({
+          id: result.id,
+          prompt: result.prompt,
+          response: result.response,
+          expectedOutput: result.expected_output,
+          score: result.score,
+          error: result.error,
+          metrics: {
+            latencyMs: result.latency_ms,
+            tokensInput: result.tokens_input,
+            tokensOutput: result.tokens_output,
+            ...result.metrics
+          },
+          testCase: result.test_cases
+        }))
+      };
 
-      if (resultsError) {
-        return res.status(500).json({ error: resultsError.message });
-      }
-
-      // Get model scores
-      const { data: scores, error: scoresError } = await supabase
-        .from('model_scores')
-        .select('*')
-        .eq('benchmark_run_id', runId);
-
-      if (scoresError) {
-        return res.status(500).json({ error: scoresError.message });
-      }
-
-      return res.json({
-        run,
-        results: results || [],
-        scores: scores || []
-      });
+      return res.json(transformedRun);
     } catch (error) {
       console.error(`Error fetching benchmark results for run ${runId}:`, error);
       return res.status(500).json({ error: 'Failed to fetch benchmark results' });
@@ -300,66 +524,6 @@ export class BenchmarkController {
       return res.status(500).json({ 
         error: error instanceof Error ? error.message : 'Failed to register model' 
       });
-    }
-  }
-
-  /**
-   * Get all active benchmark runs
-   */
-  async getBenchmarkRuns(req: Request, res: Response): Promise<Response> {
-    try {
-      console.log('Fetching benchmark runs...');
-      const { data, error } = await supabase
-        .from('benchmark_runs')
-        .select(`
-          *,
-          benchmark_run_models (
-            models (
-              id,
-              name,
-              provider
-            )
-          ),
-          benchmark_run_benchmarks (
-            benchmarks (
-              id,
-              name
-            )
-          )
-        `)
-        .order('created_at', { ascending: false })
-        .limit(10);
-
-      if (error) {
-        console.error('Supabase error:', error);
-        return res.status(500).json({ error: error.message });
-      }
-
-      if (!data) {
-        console.log('No data returned from Supabase');
-        return res.json([]);
-      }
-
-      console.log('Raw data from Supabase:', data);
-
-      // Transform the data to match the frontend's expected format
-      const runs = data.map(run => ({
-        id: run.id,
-        modelId: run.benchmark_run_models?.[0]?.models?.id,
-        modelName: run.benchmark_run_models?.[0]?.models?.name,
-        benchmarkType: run.benchmark_run_benchmarks?.[0]?.benchmarks?.name,
-        status: run.status,
-        progress: run.progress || 0,
-        startTime: run.started_at,
-        endTime: run.completed_at,
-        error: run.error
-      }));
-
-      console.log('Transformed data:', runs);
-      return res.json(runs);
-    } catch (error) {
-      console.error('Unexpected error in getBenchmarkRuns:', error);
-      return res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to fetch benchmark runs' });
     }
   }
 } 

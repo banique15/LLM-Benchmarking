@@ -45,12 +45,12 @@ export interface BenchmarkResult {
   model_id: string;
   benchmark_id: string;
   test_case_id: string;
-  output?: string;
-  score?: number;
-  metrics?: Record<string, any>;
-  latency_ms?: number;
-  tokens_input?: number;
-  tokens_output?: number;
-  error?: string;
-  created_at?: Date;
+  prompt: string;
+  response?: string | null;
+  expected_output?: string;
+  evaluation_criteria?: Record<string, any>;
+  score: number;
+  error?: string | null;
+  created_at?: string;
+  updated_at?: string;
 } 
