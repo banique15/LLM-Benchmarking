@@ -36,12 +36,11 @@ export class BenchmarkEngine {
       // Create a new benchmark run record
       const { data: benchmarkRun, error: createError } = await supabase
         .from('benchmark_runs')
-        .insert([
-          {
-            status: 'running',
-            started_at: new Date().toISOString()
-          }
-        ])
+        .insert({
+          status: 'running',
+          progress: 0,
+          started_at: new Date().toISOString()
+        })
         .select()
         .single();
 
@@ -50,42 +49,15 @@ export class BenchmarkEngine {
       }
 
       // Link the benchmark and model to the run
-      await supabase.from('benchmark_run_benchmarks').insert([
-        {
-          benchmark_run_id: benchmarkRun.id,
-          benchmark_id: benchmarkId
-        }
+      await Promise.all([
+        supabase
+          .from('benchmark_run_benchmarks')
+          .insert({ benchmark_run_id: benchmarkRun.id, benchmark_id: benchmarkId }),
+        supabase
+          .from('benchmark_run_models')
+          .insert({ benchmark_run_id: benchmarkRun.id, model_id: modelId })
       ]);
 
-      await supabase.from('benchmark_run_models').insert([
-        {
-          benchmark_run_id: benchmarkRun.id,
-          model_id: modelId
-        }
-      ]);
-
-      // Start the benchmark process in the background
-      this.executeBenchmark(benchmarkRun.id, benchmarkId, modelId, mergedOptions)
-        .catch(err => console.error(`Error executing benchmark ${benchmarkRun.id}:`, err));
-
-      return benchmarkRun.id;
-    } catch (error) {
-      console.error('Error starting benchmark:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Execute the benchmark process
-   * This should run asynchronously after returning the benchmark run ID to the client
-   */
-  private async executeBenchmark(
-    benchmarkRunId: string,
-    benchmarkId: string,
-    modelId: string,
-    options: Required<BenchmarkOptions>
-  ): Promise<void> {
-    try {
       // Fetch test cases for this benchmark
       const { data: testCases, error: testCasesError } = await supabase
         .from('test_cases')
@@ -107,162 +79,183 @@ export class BenchmarkEngine {
         throw new Error(`Failed to fetch model: ${modelError?.message}`);
       }
 
-      // Get the appropriate connector
-      const connector = this.getConnectorForModel(model);
-      if (!connector) {
-        throw new Error(`No connector available for model: ${model.provider}`);
+      // Get the LLM connector
+      const llmConnector = LLMConnectorFactory.getOpenRouterConnector();
+      if (!llmConnector) {
+        throw new Error('OpenRouter connector is not configured');
       }
 
-      // Run test cases in batches to control concurrency
-      const results: BenchmarkResult[] = [];
-      const batchSize = options.maxConcurrentTests;
-      const totalTestCases = testCases.length;
-      let completedTestCases = 0;
-      
-      for (let i = 0; i < testCases.length; i += batchSize) {
-        const batch = testCases.slice(i, i + batchSize);
-        const batchResults = await Promise.all(
-          batch.map(testCase => this.runTestCase(
-            benchmarkRunId, 
-            model, 
-            testCase, 
-            connector, 
-            options
-          ))
-        );
-        
-        results.push(...batchResults);
-        completedTestCases += batch.length;
+      // Construct full model identifier
+      const fullModelId = `${model.provider}/${model.name}`;
+      console.log('Using model:', fullModelId);
 
-        // Update progress
-        const progress = Math.round((completedTestCases / totalTestCases) * 100);
-        await supabase
-          .from('benchmark_runs')
-          .update({ progress })
-          .eq('id', benchmarkRunId);
+      // Run each test case
+      const totalTests = testCases.length;
+      for (let i = 0; i < testCases.length; i++) {
+        const testCase = testCases[i];
+        try {
+          console.log(`Running test case ${i + 1}/${totalTests}:`, testCase.prompt);
+          
+          // Generate response from the model
+          const startTime = Date.now();
+          const response = await llmConnector.generateText(testCase.prompt, {
+            model: fullModelId,
+            temperature: 0, // Use deterministic output for benchmarking
+            max_tokens: 1000,
+            ...options
+          });
+          const duration = Date.now() - startTime;
+
+          console.log('Model response:', response.text);
+          
+          // Save test result first
+          const { data: testResult, error: testResultError } = await supabase
+            .from('test_results')
+            .insert({
+              benchmark_run_id: benchmarkRun.id,
+              model_id: modelId,
+              test_case_id: testCase.id,
+              output: response.text,
+              latency_ms: duration,
+              tokens_input: response.usage?.prompt_tokens,
+              tokens_output: response.usage?.completion_tokens
+            })
+            .select()
+            .single();
+
+          if (testResultError) {
+            console.error('Error saving test result:', testResultError);
+            throw testResultError;
+          }
+
+          // Calculate score and save to test_scores
+          const score = this.evaluateResponse(
+            response.text,
+            testCase.expected_output,
+            testCase.evaluation_criteria
+          );
+
+          const { error: scoreError } = await supabase
+            .from('test_scores')
+            .insert({
+              test_result_id: testResult.id,
+              score: score,
+              evaluation_method: 'automatic',
+              evaluator_notes: JSON.stringify({
+                criteria: testCase.evaluation_criteria,
+                expected_output: testCase.expected_output
+              })
+            });
+
+          if (scoreError) {
+            console.error('Error saving test score:', scoreError);
+            throw scoreError;
+          }
+
+          console.log(`Test case ${i + 1}/${totalTests} completed:`, {
+            prompt: testCase.prompt,
+            response: response.text,
+            score: score
+          });
+
+          // Update progress
+          await supabase
+            .from('benchmark_runs')
+            .update({
+              progress: ((i + 1) / totalTests) * 100
+            })
+            .eq('id', benchmarkRun.id);
+
+        } catch (error) {
+          console.error(`Error running test case ${testCase.id}:`, error);
+          
+          // Save failed test result
+          const { error: testResultError } = await supabase
+            .from('test_results')
+            .insert({
+              benchmark_run_id: benchmarkRun.id,
+              model_id: modelId,
+              test_case_id: testCase.id,
+              output: null,
+              error: error instanceof Error ? error.message : 'Unknown error'
+            });
+
+          if (testResultError) {
+            console.error('Error saving failed test result:', testResultError);
+          }
+
+          // Save zero score for failed test
+          const { data: testResult } = await supabase
+            .from('test_results')
+            .select('id')
+            .eq('benchmark_run_id', benchmarkRun.id)
+            .eq('test_case_id', testCase.id)
+            .single();
+
+          if (testResult) {
+            const { error: scoreError } = await supabase
+              .from('test_scores')
+              .insert({
+                test_result_id: testResult.id,
+                score: 0,
+                evaluation_method: 'automatic',
+                evaluator_notes: JSON.stringify({
+                  error: error instanceof Error ? error.message : 'Unknown error'
+                })
+              });
+
+            if (scoreError) {
+              console.error('Error saving failed test score:', scoreError);
+            }
+          }
+        }
       }
 
-      // Calculate and save scores
-      await this.calculateAndSaveScore(benchmarkRunId, benchmarkId, modelId);
+      // Calculate final scores
+      await this.calculateAndSaveScore(benchmarkRun.id, benchmarkId, modelId);
 
-      // Update benchmark run status to completed
+      // Mark benchmark run as completed
       await supabase
         .from('benchmark_runs')
         .update({
           status: 'completed',
-          completed_at: new Date().toISOString(),
-          progress: 100
+          progress: 100,
+          completed_at: new Date().toISOString()
         })
-        .eq('id', benchmarkRunId);
+        .eq('id', benchmarkRun.id);
 
+      return benchmarkRun.id;
     } catch (error) {
-      console.error(`Error executing benchmark ${benchmarkRunId}:`, error);
-
-      // Update benchmark run status to failed
-      await supabase
-        .from('benchmark_runs')
-        .update({
-          status: 'failed',
-          completed_at: new Date().toISOString(),
-          error: error instanceof Error ? error.message : 'Unknown error occurred'
-        })
-        .eq('id', benchmarkRunId);
+      console.error('Error running benchmark:', error);
+      throw error;
     }
   }
 
-  /**
-   * Run a single test case against a model
-   */
-  private async runTestCase(
-    benchmarkRunId: string,
-    model: Model,
-    testCase: TestCase,
-    connector: LLMConnector,
-    options: Required<BenchmarkOptions>
-  ): Promise<BenchmarkResult> {
-    try {
-      // Configure options for the LLM request
-      const llmOptions: LLMRequestOptions = {
-        model: `${model.provider}/${model.name}`,
-        temperature: 0, // Use deterministic output for benchmarking
-        max_tokens: 1000,
-        ...model.parameters // Add any model-specific parameters
-      };
-
-      // Run the test case
-      const response = await connector.generateText(testCase.prompt, llmOptions);
-
-      // Basic scoring based on whether expected output is present
-      // This is a simple example - in a real system you'd have more sophisticated evaluation
-      let score = 0;
-      if (testCase.expected_output && response.text.includes(testCase.expected_output)) {
-        score = 1;
-      }
-
-      // Create result object
-      const result = {
-        benchmark_run_id: benchmarkRunId,
-        model_id: model.id!,
-        benchmark_id: testCase.benchmark_id,
-        test_case_id: testCase.id!,
-        prompt: testCase.prompt,
-        response: response.text,
-        expected_output: testCase.expected_output,
-        evaluation_criteria: testCase.evaluation_criteria,
-        score: score,
-        error: null,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      };
-
-      // Refresh schema cache before saving
-      await refreshSchemaCache();
-
-      // Save result to database
-      const { error: insertError } = await supabase
-        .from('benchmark_results')
-        .insert([result]);
-
-      if (insertError) {
-        throw new Error(`Failed to save benchmark result: ${insertError.message}`);
-      }
-
-      // Return result
-      return result;
-    } catch (error) {
-      console.error(`Error running test case ${testCase.id}:`, error);
-      
-      // Create error result
-      const errorResult = {
-        benchmark_run_id: benchmarkRunId,
-        model_id: model.id!,
-        benchmark_id: testCase.benchmark_id,
-        test_case_id: testCase.id!,
-        prompt: testCase.prompt,
-        response: null,
-        expected_output: testCase.expected_output,
-        evaluation_criteria: testCase.evaluation_criteria,
-        score: 0,
-        error: error instanceof Error ? error.message : String(error),
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      };
-
-      // Refresh schema cache before saving error result
-      await refreshSchemaCache();
-
-      // Save error result to database
-      const { error: insertError } = await supabase
-        .from('benchmark_results')
-        .insert([errorResult]);
-
-      if (insertError) {
-        throw new Error(`Failed to save benchmark error result: ${insertError.message}`);
-      }
-
-      // Return error result
-      return errorResult;
+  private evaluateResponse(response: string, expectedOutput: string, criteria: any): number {
+    // Parse evaluation criteria
+    const evaluationRules = criteria ? JSON.parse(criteria) : {};
+    
+    // Default exact match if no specific criteria
+    if (!evaluationRules || Object.keys(evaluationRules).length === 0) {
+      return response.trim().toLowerCase() === expectedOutput.trim().toLowerCase() ? 1 : 0;
     }
+
+    // Handle different types of evaluation
+    if (evaluationRules.exact_match) {
+      return response.trim().toLowerCase() === expectedOutput.trim().toLowerCase() ? 1 : 0;
+    }
+
+    if (evaluationRules.keywords) {
+      const keywords = evaluationRules.keywords;
+      const responseWords = response.toLowerCase().split(/\s+/);
+      const matchedKeywords = keywords.filter((keyword: string) => 
+        responseWords.includes(keyword.toLowerCase())
+      );
+      return matchedKeywords.length / keywords.length;
+    }
+
+    // Add more evaluation methods as needed
+    return 0;
   }
 
   /**

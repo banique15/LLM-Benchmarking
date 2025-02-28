@@ -21,12 +21,29 @@ const BenchmarkStatus: React.FC = () => {
       const response = await axios.get<BenchmarkRunStatus[]>(
         `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/api/benchmarks/status`
       );
-      console.log('API Response:', response.data);
-      setRuns(response.data);
+      
+      // Validate and transform the response data
+      const validatedRuns = response.data.map(run => ({
+        ...run,
+        // Ensure required fields have default values
+        status: run.status || 'unknown',
+        progress: run.progress ?? 0,
+        startTime: run.startTime || new Date().toISOString(),
+        model: run.model || { id: '', name: 'Unknown Model', provider: 'Unknown Provider' },
+        benchmark: run.benchmark || { id: '', name: 'Unknown Benchmark', description: '' }
+      }));
+
+      setRuns(validatedRuns);
       setError(null);
     } catch (err) {
       console.error('Error fetching benchmark status:', err);
-      setError('Failed to load benchmark status. Please try again later.');
+      if (axios.isAxiosError(err)) {
+        const errorMessage = err.response?.data?.error || err.message;
+        console.error('Detailed error:', errorMessage);
+        setError(`Failed to load benchmark status: ${errorMessage}`);
+      } else {
+        setError('Failed to load benchmark status. Please try again later.');
+      }
     }
   };
 
@@ -34,31 +51,50 @@ const BenchmarkStatus: React.FC = () => {
     setLoading(true);
     fetchStatus().finally(() => setLoading(false));
 
-    // Poll for updates every 5 seconds
-    const interval = setInterval(fetchStatus, 5000);
+    // Poll for updates every 5 seconds for running benchmarks
+    const interval = setInterval(() => {
+      // Only poll if there are running benchmarks
+      if (runs.some(run => run.status === 'running')) {
+        fetchStatus();
+      }
+    }, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [runs]);
 
   const formatDuration = (startTime: string, endTime?: string | null) => {
-    const start = new Date(startTime);
-    const end = endTime ? new Date(endTime) : new Date();
-    const duration = Math.floor((end.getTime() - start.getTime()) / 1000); // in seconds
+    try {
+      const start = new Date(startTime);
+      const end = endTime ? new Date(endTime) : new Date();
+      const duration = Math.floor((end.getTime() - start.getTime()) / 1000); // in seconds
 
-    if (duration < 60) {
-      return `${duration}s`;
-    } else if (duration < 3600) {
-      const minutes = Math.floor(duration / 60);
-      const seconds = duration % 60;
-      return `${minutes}m ${seconds}s`;
-    } else {
-      const hours = Math.floor(duration / 3600);
-      const minutes = Math.floor((duration % 3600) / 60);
-      return `${hours}h ${minutes}m`;
+      if (isNaN(duration)) {
+        return 'Invalid duration';
+      }
+
+      if (duration < 60) {
+        return `${duration}s`;
+      } else if (duration < 3600) {
+        const minutes = Math.floor(duration / 60);
+        const seconds = duration % 60;
+        return `${minutes}m ${seconds}s`;
+      } else {
+        const hours = Math.floor(duration / 3600);
+        const minutes = Math.floor((duration % 3600) / 60);
+        return `${hours}h ${minutes}m`;
+      }
+    } catch (error) {
+      console.error('Error formatting duration:', error);
+      return 'Invalid duration';
     }
   };
 
   const formatDate = (date: string) => {
-    return new Date(date).toLocaleString();
+    try {
+      return new Date(date).toLocaleString();
+    } catch (error) {
+      console.error('Error formatting date:', error);
+      return 'Invalid date';
+    }
   };
 
   const sortedAndFilteredRuns = useMemo(() => {
@@ -69,31 +105,36 @@ const BenchmarkStatus: React.FC = () => {
       filteredRuns = runs.filter(run => run.status === statusFilter);
     }
 
-    // Apply sorting
+    // Apply sorting with error handling
     return [...filteredRuns].sort((a, b) => {
-      switch (sortField) {
-        case 'started_at':
-          return sortOrder === 'asc' 
-            ? new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
-            : new Date(b.startTime).getTime() - new Date(a.startTime).getTime();
-        case 'status':
-          return sortOrder === 'asc'
-            ? a.status.localeCompare(b.status)
-            : b.status.localeCompare(a.status);
-        case 'model':
-          const modelNameA = a.model?.name || '';
-          const modelNameB = b.model?.name || '';
-          return sortOrder === 'asc'
-            ? modelNameA.localeCompare(modelNameB)
-            : modelNameB.localeCompare(modelNameA);
-        case 'benchmark':
-          const benchmarkNameA = a.benchmark?.name || '';
-          const benchmarkNameB = b.benchmark?.name || '';
-          return sortOrder === 'asc'
-            ? benchmarkNameA.localeCompare(benchmarkNameB)
-            : benchmarkNameB.localeCompare(benchmarkNameA);
-        default:
-          return 0;
+      try {
+        switch (sortField) {
+          case 'started_at':
+            return sortOrder === 'asc' 
+              ? new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+              : new Date(b.startTime).getTime() - new Date(a.startTime).getTime();
+          case 'status':
+            return sortOrder === 'asc'
+              ? (a.status || '').localeCompare(b.status || '')
+              : (b.status || '').localeCompare(a.status || '');
+          case 'model':
+            const modelNameA = a.model?.name || '';
+            const modelNameB = b.model?.name || '';
+            return sortOrder === 'asc'
+              ? modelNameA.localeCompare(modelNameB)
+              : modelNameB.localeCompare(modelNameA);
+          case 'benchmark':
+            const benchmarkNameA = a.benchmark?.name || '';
+            const benchmarkNameB = b.benchmark?.name || '';
+            return sortOrder === 'asc'
+              ? benchmarkNameA.localeCompare(benchmarkNameB)
+              : benchmarkNameB.localeCompare(benchmarkNameA);
+          default:
+            return 0;
+        }
+      } catch (error) {
+        console.error('Error sorting runs:', error);
+        return 0;
       }
     });
   }, [runs, sortField, sortOrder, statusFilter]);

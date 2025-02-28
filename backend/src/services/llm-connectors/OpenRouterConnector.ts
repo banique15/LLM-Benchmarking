@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { isAxiosError } from 'axios';
 import { LLMConnector, LLMRequestOptions, LLMResponse } from './LLMConnector';
 
 // Enhanced model interface to include more details
@@ -28,7 +28,9 @@ export class OpenRouterConnector implements LLMConnector {
       const response = await axios.get(`${this.baseUrl}/models`, {
         headers: {
           'Authorization': `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://llm-benchmarking-platform',
+          'X-Title': 'LLM Benchmarking Platform'
         }
       });
 
@@ -105,6 +107,10 @@ export class OpenRouterConnector implements LLMConnector {
       };
     } catch (error) {
       console.error('Error generating text with OpenRouter:', error);
+      if (isAxiosError(error)) {
+        const errorMessage = error.response?.data?.error?.message || error.message;
+        throw new Error(`OpenRouter API error: ${errorMessage}`);
+      }
       throw new Error(`OpenRouter API error: ${error}`);
     }
   }

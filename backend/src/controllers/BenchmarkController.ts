@@ -249,6 +249,7 @@ export class BenchmarkController {
         .single();
 
       if (error) {
+        console.error('Error fetching benchmark run:', error);
         return res.status(500).json({ error: error.message });
       }
 
@@ -256,44 +257,40 @@ export class BenchmarkController {
         return res.status(404).json({ error: 'Benchmark run not found' });
       }
 
-      // Calculate duration if not stored
-      const duration = data.duration || (
-        data.completed_at ? 
-        (new Date(data.completed_at).getTime() - new Date(data.started_at).getTime()) / 1000 :
-        (new Date().getTime() - new Date(data.started_at).getTime()) / 1000
-      );
-
-      // Transform the data to include model and benchmark information
+      // Transform the data to match the frontend's expected format
       const transformedData = {
         id: data.id,
         status: data.status,
-        progress: data.progress || 0,
+        progress: data.progress,
         startTime: data.started_at,
         endTime: data.completed_at,
-        duration: `${Math.round(duration)}s`,
         error: data.error,
-        model: data.benchmark_run_models?.[0]?.model || null,
-        benchmark: data.benchmark_run_benchmarks?.[0]?.benchmark || null
+        duration: data.duration,
+        model: data.benchmark_run_models[0]?.model || null,
+        benchmark: data.benchmark_run_benchmarks[0]?.benchmark || null
       };
 
-      console.log('Benchmark status response:', JSON.stringify(transformedData, null, 2));
       return res.json(transformedData);
     } catch (error) {
-      console.error(`Error fetching benchmark run ${runId}:`, error);
+      console.error('Error fetching benchmark run status:', error);
       return res.status(500).json({ error: 'Failed to fetch benchmark run status' });
     }
   }
 
   /**
-   * Get all active benchmark runs
+   * Get all benchmark runs
    */
   async getBenchmarkRuns(req: Request, res: Response): Promise<Response> {
     try {
-      console.log('Fetching benchmark runs...');
       const { data, error } = await supabase
         .from('benchmark_runs')
         .select(`
-          *,
+          id,
+          status,
+          progress,
+          started_at,
+          completed_at,
+          error,
           benchmark_run_models (
             model:models (
               id,
@@ -309,54 +306,29 @@ export class BenchmarkController {
             )
           )
         `)
-        .order('created_at', { ascending: false })
-        .limit(10);
+        .order('started_at', { ascending: false });
 
       if (error) {
-        console.error('Supabase error:', error);
+        console.error('Error fetching benchmark runs:', error);
         return res.status(500).json({ error: error.message });
       }
 
-      if (!data) {
-        console.log('No data returned from Supabase');
-        return res.json([]);
-      }
+      // Transform each run to match the frontend's expected format
+      const transformedData = data.map(run => ({
+        id: run.id,
+        status: run.status,
+        progress: run.progress,
+        startTime: run.started_at,
+        endTime: run.completed_at,
+        error: run.error,
+        model: run.benchmark_run_models[0]?.model || null,
+        benchmark: run.benchmark_run_benchmarks[0]?.benchmark || null
+      }));
 
-      console.log('Raw data from Supabase:', JSON.stringify(data, null, 2));
-
-      // Transform the data to match the frontend's expected format
-      const runs = data.map(run => {
-        const modelData = run.benchmark_run_models?.[0]?.model;
-        const benchmarkData = run.benchmark_run_benchmarks?.[0]?.benchmark;
-
-        const transformedRun = {
-          id: run.id,
-          status: run.status,
-          progress: run.progress || 0,
-          startTime: run.started_at,
-          endTime: run.completed_at,
-          error: run.error,
-          model: modelData ? {
-            id: modelData.id,
-            name: modelData.name,
-            provider: modelData.provider
-          } : null,
-          benchmark: benchmarkData ? {
-            id: benchmarkData.id,
-            name: benchmarkData.name,
-            description: benchmarkData.description
-          } : null
-        };
-
-        console.log('Single transformed run:', JSON.stringify(transformedRun, null, 2));
-        return transformedRun;
-      });
-
-      console.log('All transformed runs:', JSON.stringify(runs, null, 2));
-      return res.json(runs);
+      return res.json(transformedData);
     } catch (error) {
-      console.error('Unexpected error in getBenchmarkRuns:', error);
-      return res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to fetch benchmark runs' });
+      console.error('Error fetching benchmark runs:', error);
+      return res.status(500).json({ error: 'Failed to fetch benchmark runs' });
     }
   }
 

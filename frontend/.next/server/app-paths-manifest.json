@@ -1,5 +1,5 @@
 {
+  "/models/page": "app/models/page.js",
   "/results/page": "app/results/page.js",
-  "/benchmarks/page": "app/benchmarks/page.js",
-  "/models/page": "app/models/page.js"
+  "/benchmarks/page": "app/benchmarks/page.js"
 }
